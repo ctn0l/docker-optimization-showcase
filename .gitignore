@@ -16,6 +16,7 @@ dependency-reduced-pom.xml
 .idea/workspace.xml
 .idea/modules.xml
 .idea/*.iml
+misc.xml
 
 # VS Code
 .vscode/
