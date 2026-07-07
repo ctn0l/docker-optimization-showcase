@@ -7,19 +7,18 @@ pom.xml.next
 release.properties
 dependency-reduced-pom.xml
 
-# IDE IntelliJ IDEA
-.idea/
-*.iml
-*.ipr
-*.iws
-*.irp
+# IntelliJ IDEA (file generati localmente, non da committare)
+.idea/compiler.xml
+.idea/encodings.xml
+.idea/jarRepositories.xml
+.idea/misc.xml
+.idea/vcs.xml
+.idea/workspace.xml
+.idea/modules.xml
+.idea/*.iml
 
-# IDE Eclipse
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
+# VS Code
+.vscode/
 
 # MD files (documentazione di progetto, non in Git)
 /*.md
