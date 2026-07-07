@@ -10,3 +10,20 @@
 /dataSources.local.xml
 
 *.md
+
+target/
+.mvn/
+
+.idea/
+*.iml
+*.irp
+*.iws
+
+.settings/
+.vscode/
+
+*.swp
+*.swo
+.DS_Store
+
+*.log
