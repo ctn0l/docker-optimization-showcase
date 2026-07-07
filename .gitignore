@@ -1,0 +1,28 @@
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+
+# IDE IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+*.irp
+
+# IDE Eclipse
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+
+# MD files (documentazione di progetto, non in Git)
+/*.md
+
+# OS X
+.DS_Store
