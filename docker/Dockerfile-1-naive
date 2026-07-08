@@ -1,0 +1,10 @@
+# Immagine non ottimizzata
+FROM eclipse-temurin:25-jdk
+WORKDIR /app
+# COPY . . senza .dockerignore copia TUTTO il contesto di build:
+# include target/, .git/, .idea/, ecc. → immagine enorme (~600+ MB)
+COPY . .
+RUN ./mvnw clean package -DskipTests --batch-mode
+EXPOSE 8080
+# Nessuno user impostato - root
+CMD ["java", "-jar","target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar"]
