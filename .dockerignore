@@ -1,0 +1,30 @@
+# Maven / Build output
+target/
+dependency-reduced-pom.xml
+
+# Git
+.git/
+.gitattributes
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Documentation (tranne README se serve nel container)
+docs/
+*.md
+!README.md
+
+# Logs
+logs/
+*.log
+
+# File specifici
+.mvn/wrapper/maven-wrapper.jar
+!mvnw
+!mvnw.cmd
+
+# OS X
+.DS_Store
