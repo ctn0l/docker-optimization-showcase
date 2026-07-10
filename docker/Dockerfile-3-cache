@@ -1,0 +1,62 @@
+# =============================================================================
+# Dockerfile-3-layered: Ottimizzazione build con cache mount e ordinamento layer
+# =============================================================================
+#
+# Introduzione:
+# - Usiamo BUILDKIT --mount=type=cache per riciclare le dipendenze Maven tra build
+#   (non serve riscaricarle da internet a ogni build)
+# - Ordiniamo i COPY per sfruttare al massimo il caching di Docker:
+#   * pom.xml e mvnw prima (cambiano raramente)
+#   * src/ dopo (cambia frequentemente con il codice)
+#
+# Questo approach non usa l'estrazione fisica dei layer (Spring Boot 4 li mantiene
+# interni al JAR), ma ottimizza lo stesso il caching Docker tramite ordine.
+#
+# Struttura del layered JAR (Spring Boot 4 - interna al JAR):
+#   BOOT-INF/classes/    ← il tuo codice (cambia spesso)
+#   BOOT-INF/lib/        ← dipendenze esterne (raramente cambiano)
+#
+# Per sfruttare appieno i layer, servirebbe l'estrazione fisica con tool esterni.
+# Qui ottimizziamo con:
+# 1. BuildKit cache mount per Maven (.m2)
+# 2. Ordine dei COPY (pom.xml prima di src/)
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# STAGE 1: Build
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk AS builder
+
+WORKDIR /build
+
+# Copio solo wrapper e pom.xml: questi cambiano raramente, quindi stare in alto
+# sfrutta la cache Docker per le build successive (se non hai cambiato pom.xml,
+# questo layer e tutti quelli successivi fino al COPY src sono in CACHE)
+COPY mvnw pom.xml ./
+COPY .mvn .mvn/
+
+# BuildKit cache mount su ~/.m2: le dipendenze scaricate qui vengono riciclate
+# tra build successive (non serve riscaricarle da internet)
+RUN --mount=type=cache,target=/root/.m2 ./mvnw dependency:go-offline -DskipTests
+
+# Ora copio il codice sorgente (questo e' il layer che cambia di piu')
+COPY src/ ./src/
+
+# Build del JAR: Spring Boot 4 genera un layered JAR internamente
+RUN --mount=type=cache,target=/root/.m2 ./mvnw clean package -DskipTests --batch-mode
+
+
+# -----------------------------------------------------------------------------
+# STAGE 2: Runtime
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jre
+
+WORKDIR /app
+
+# Copio solo il JAR dal builder (Spring Boot 4 ha gia' tutto dentro il JAR)
+COPY --from=builder /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar app.jar
+
+EXPOSE 8080
+
+CMD ["java", "-jar", "app.jar"]
