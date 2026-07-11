@@ -1,0 +1,91 @@
+# =============================================================================
+# Dockerfile-4-slim: runtime minimale (jlink) + hardening (non-root, HEALTHCHECK)
+# =============================================================================
+#
+# Idea: non usare la JRE completa di Temurin, ma costruirne una SU MISURA con
+# jlink, contenente solo i moduli della piattaforma Java che l'app usa davvero.
+#
+# Catena coerente su musl (Alpine end-to-end):
+#   build  -> eclipse-temurin:25-jdk-alpine   (musl)
+#   runtime-> alpine:3                         (musl)
+# Il runtime jlink e' legato alla libc con cui viene generato: costruirlo su
+# musl e farlo girare su musl evita l'incompatibilita' glibc/musl.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# STAGE 1: Build + generazione runtime custom
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk-alpine AS builder
+
+WORKDIR /build
+
+# --- Build del JAR (identica alla variante 3: ordine layer + cache mount) ---
+COPY mvnw pom.xml ./
+COPY .mvn .mvn/
+RUN --mount=type=cache,target=/root/.m2 ./mvnw dependency:go-offline -DskipTests
+COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.m2 ./mvnw clean package -DskipTests --batch-mode
+
+# --- Esplosione del fat JAR ---------------------------------------------------
+# Un JAR Spring Boot e' un "JAR di JAR": il codice è in BOOT-INF/classes,
+# le dipendenze in BOOT-INF/lib. jdeps deve vederle esplose per analizzarle.
+RUN mkdir -p /build/exploded && cd /build/exploded && \
+    jar xf /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar
+
+# --- jdeps (scoperta moduli) + jlink (costruzione runtime) --------------------
+# jdeps analizza classi + librerie e stampa (SOLO su stdout) la lista dei moduli
+# JDK necessari. La catturo in una variabile di shell e la passo a jlink.
+#   --print-module-deps : output pronto per --add-modules (java.base,java.sql,...)
+#   --ignore-missing-deps: Spring ha dipendenze opzionali non sul classpath
+#   --multi-release 25   : molte lib sono multi-release, evita warning/errori
+# Ai moduli trovati AGGIUNGO a mano quelli che jdeps NON vede perche' caricati
+# via reflection a runtime (TLS, JNDI, ecc.): e' l'insidia nota di jlink+Spring.
+RUN cd /build/exploded && \
+    JAVA_MODULES=$(jdeps \
+        --print-module-deps \
+        --ignore-missing-deps \
+        --multi-release 25 \
+        --class-path 'BOOT-INF/lib/*' \
+        BOOT-INF/classes) && \
+    echo "Moduli rilevati da jdeps: ${JAVA_MODULES}" && \
+    jlink \
+        --add-modules "${JAVA_MODULES},jdk.crypto.ec,jdk.crypto.cryptoki,jdk.naming.dns,java.naming,jdk.unsupported,java.management,java.instrument" \
+        --strip-debug \
+        --no-header-files \
+        --no-man-pages \
+        --compress=zip-6 \
+        --output /build/custom-jre
+
+
+# -----------------------------------------------------------------------------
+# STAGE 2: Runtime minimale e hardened
+# -----------------------------------------------------------------------------
+FROM alpine:3.22
+
+# La JVM (anche in un runtime jlink) linka alcune librerie native di sistema:
+# su Alpine servono almeno libstdc++. Senza, l'avvio fallisce con un errore del
+# tipo "Error loading shared library libstdc++.so.6"
+RUN apk add --no-cache libstdc++
+
+WORKDIR /app
+
+# Utente non-root dedicato
+# NON ha i privilegi di root nel container
+RUN addgroup -S app && adduser -S app -G app
+
+# Copio il runtime custom e il JAR. --chown assegna i file all'utente non-root.
+COPY --from=builder --chown=app:app /build/custom-jre /opt/jre
+COPY --from=builder --chown=app:app /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar /app/app.jar
+
+USER app
+
+EXPOSE 8080
+
+# HEALTHCHECK senza curl: Alpine include busybox, che fornisce wget.
+# --spider = "controlla e basta", non scarica il body. Esce !=0 se non 200.
+# start-period da' tempo alla JVM di avviarsi prima di considerare unhealthy.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD wget -q --spider http://localhost:8080/actuator/health || exit 1
+
+# Uso il java del runtime custom (non c'e' PATH di sistema verso una JRE).
+ENTRYPOINT ["/opt/jre/bin/java", "-jar", "/app/app.jar"]
