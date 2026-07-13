@@ -1,0 +1,122 @@
+# =============================================================================
+# Dockerfile-5-aot: startup ottimizzato con Spring AOT + Java 25 AOT Cache
+# =============================================================================
+#
+# Questo Dockerfile combina DUE ottimizzazioni:
+#   1. jlink runtime minimale (come M4-slim)
+#   2. Java AOT Cache (Project Leyden, JEP 483/514): classi pre-caricate e
+#      pre-linkate registrate in una "training run" e riusate a runtime.
+#      E' una feature della JVM standard, indipendente dallo Spring AOT.
+#
+# REGOLA D'ORO delle training run: si allena con lo STESSO identico comando e la
+# STESSA JVM con cui si esegue in produzione. Per questo:
+#   - training e runtime usano ENTRAMBI il JAR ESTRATTO (layout con classloader
+#     standard: thin jar + lib/), non il fat-jar nested;
+#   - training e runtime usano ENTRAMBI /opt/jre (il runtime jlink), non il JDK;
+#   - l'app estratta vive allo STESSO path assoluto (/app) in build e runtime,
+#     cosi' il classpath registrato nella cache combacia (CDS/AOT e' sensibile ai
+#     path del classpath).
+#
+# Nota: l'AOT cache e' legata al JAR e alla JVM esatti. Cambiando il JAR o la
+#       JVM, la cache diventa invalida e va rigenerata (il multi-stage lo garantisce).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# STAGE 1: Build + runtime custom (jlink) + estrazione + AOT cache
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk-alpine AS builder
+
+WORKDIR /build
+
+# --- Build del JAR (ordine layer + cache mount, identico a M3/M4) ------------
+# NB: mvnw e il pom vanno nella root; la directory .mvn va copiata COME directory
+# (COPY .mvn .mvn/), altrimenti il suo contenuto viene "appiattito" e mvnw non
+# trova .mvn/wrapper/maven-wrapper.properties.
+COPY mvnw pom.xml ./
+COPY .mvn .mvn/
+RUN --mount=type=cache,target=/root/.m2 ./mvnw dependency:go-offline -DskipTests
+
+COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.m2 ./mvnw clean package -DskipTests --batch-mode
+
+# --- Esplosione del fat JAR (SOLO per jdeps) ---------------------------------
+# jdeps ha bisogno di vedere BOOT-INF/classes e BOOT-INF/lib esplosi. Questa
+# esplosione "grezza" (jar xf) serve unicamente ad analizzare i moduli.
+RUN mkdir -p /build/exploded && cd /build/exploded && \
+    jar xf /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar
+
+# --- jdeps (scoperta moduli) + jlink (costruzione runtime) -------------------
+# Identico a M4-slim: scopri i moduli JDK usati e costruisci un runtime custom.
+# Ai moduli trovati si AGGIUNGONO a mano quelli caricati via reflection (TLS,
+# JNDI, ...) che jdeps non vede: e' l'insidia nota jlink+Spring.
+RUN cd /build/exploded && \
+    JAVA_MODULES=$(jdeps \
+        --print-module-deps \
+        --ignore-missing-deps \
+        --multi-release 25 \
+        --class-path 'BOOT-INF/lib/*' \
+        BOOT-INF/classes) && \
+    echo "Moduli rilevati da jdeps: ${JAVA_MODULES}" && \
+    jlink \
+        --add-modules "${JAVA_MODULES},jdk.crypto.ec,jdk.crypto.cryptoki,jdk.naming.dns,java.naming,jdk.unsupported,java.management,java.instrument" \
+        --strip-debug \
+        --no-header-files \
+        --no-man-pages \
+        --compress=zip-6 \
+        --output /build/custom-jre
+
+# --- Estrazione del JAR in layout "runnable" (per AOT + runtime) -------------
+# Il tools jarmode estrae un thin jar (con Class-Path: lib/... nel manifest) +
+# la cartella lib/. Cosi' l'app gira col classloader di SISTEMA standard, con cui
+# CDS/AOT lavorano correttamente (il fat-jar nested userebbe un classloader
+# custom e la cache verrebbe scartata). Estraggo in /app: STESSO path del runtime.
+RUN java -Djarmode=tools -jar /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar \
+        extract --destination /app
+
+# --- Generazione AOT Cache (training run) ------------------------------------
+# In JDK 25 basta -XX:AOTCacheOutput (JEP 514, "one-command"): fa da solo record
+# + assembly della cache all'uscita della JVM. Niente flag diagnostici.
+#
+# Punti chiave:
+#   - uso /build/custom-jre (la STESSA JVM del runtime): la cache e' legata alla JVM.
+#   - -Dspring.context.exit=onRefresh: fa PARTIRE il context e poi USCIRE subito
+#     (exit 0) dopo il refresh. Senza, la web app non termina mai -> il RUN resta
+#     appeso all'infinito e la cache non viene mai scritta.
+RUN cd /app && /build/custom-jre/bin/java \
+        -XX:AOTCacheOutput=/app/app.aot \
+        -Dspring.context.exit=onRefresh \
+        -jar /app/docker-optimization-showcase-0.0.1-SNAPSHOT.jar
+
+# -----------------------------------------------------------------------------
+# STAGE 2: Runtime minimale e hardened
+# -----------------------------------------------------------------------------
+FROM alpine:3.22
+
+# La JVM linka librerie native di sistema. Su Alpine servono libstdc++.
+RUN apk add --no-cache libstdc++
+
+WORKDIR /app
+
+# Utente non-root dedicato (identico a M4-slim)
+RUN addgroup -S app && adduser -S app -G app
+
+# Copio il runtime custom e l'app estratta (thin jar + lib/ + app.aot).
+# Copiando l'intera /app dal builder mantengo path assoluto e classpath IDENTICI
+# a quelli usati nella training run -> la cache combacia.
+COPY --from=builder --chown=app:app /build/custom-jre /opt/jre
+COPY --from=builder --chown=app:app /app /app
+
+USER app
+
+EXPOSE 8080
+
+# HEALTHCHECK identico a M4-slim (wget busybox su Alpine)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD wget -q --spider http://localhost:8080/actuator/health || exit 1
+
+# Runtime: stessa JVM e stesso comando della training run, con:
+#   -XX:AOTCache=/app/app.aot : USA la cache generata nel build stage
+# La cache e' best-effort: se invalida la JVM avvisa e riparte senza (non crasha).
+ENTRYPOINT ["/opt/jre/bin/java", \
+    "-XX:AOTCache=/app/app.aot", \
+    "-jar", "/app/docker-optimization-showcase-0.0.1-SNAPSHOT.jar"]
