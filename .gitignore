@@ -13,8 +13,8 @@ dependency-reduced-pom.xml
 # VS Code
 .vscode/
 
-# MD files (documentazione di progetto, non in Git)
-/*.md
+# MD files (documentazione di progetto e report generati, non in Git)
+*.md
 
 # OS X
 .DS_Store
