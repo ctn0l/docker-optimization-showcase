@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test application
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Run tests
+        run: ./mvnw --batch-mode verify
+
+  docker-build:
+    name: Build ${{ matrix.variant }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: 1-naive
+            dockerfile: docker/Dockerfile-1-naive
+          - variant: 2-multistage
+            dockerfile: docker/Dockerfile-2-multistage
+          - variant: 3-cache
+            dockerfile: docker/Dockerfile-3-cache
+          - variant: 4-slim
+            dockerfile: docker/Dockerfile-4-slim
+          - variant: 5-aot
+            dockerfile: docker/Dockerfile-5-aot
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: docker-optimization-showcase:${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+  security:
+    name: Scan final image
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build final image for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile-5-aot
+          load: true
+          tags: docker-optimization-showcase:5-aot
+          cache-from: type=gha,scope=5-aot
+
+      - name: Scan for critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: docker-optimization-showcase:5-aot
+          format: table
+          exit-code: "1"
+          ignore-unfixed: false
+          vuln-type: os,library
+          severity: CRITICAL
