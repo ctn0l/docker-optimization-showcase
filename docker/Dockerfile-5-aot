@@ -1,8 +1,8 @@
 # =============================================================================
-# Dockerfile-5-aot: startup ottimizzato con Spring AOT + Java 25 AOT Cache
+# Dockerfile-5-aot: startup ottimizzato con Java 25 AOT Cache (Project Leyden)
 # =============================================================================
 #
-# Questo Dockerfile combina DUE ottimizzazioni:
+# Questo Dockerfile combina DUE ottimizzazioni cumulative:
 #   1. jlink runtime minimale (come M4-slim)
 #   2. Java AOT Cache (Project Leyden, JEP 483/514): classi pre-caricate e
 #      pre-linkate registrate in una "training run" e riusate a runtime.

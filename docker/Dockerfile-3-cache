@@ -9,17 +9,12 @@
 #   * pom.xml e mvnw prima (cambiano raramente)
 #   * src/ dopo (cambia frequentemente con il codice)
 #
-# Questo approach non usa l'estrazione fisica dei layer (Spring Boot 4 li mantiene
-# interni al JAR), ma ottimizza lo stesso il caching Docker tramite ordine.
-#
-# Struttura del layered JAR (Spring Boot 4 - interna al JAR):
-#   BOOT-INF/classes/    ← il tuo codice (cambia spesso)
-#   BOOT-INF/lib/        ← dipendenze esterne (raramente cambiano)
-#
-# Per sfruttare appieno i layer, servirebbe l'estrazione fisica con tool esterni.
-# Qui ottimizziamo con:
-# 1. BuildKit cache mount per Maven (.m2)
-# 2. Ordine dei COPY (pom.xml prima di src/)
+# Separiamo inoltre il layered JAR di Spring Boot nei quattro layer nativi:
+#   dependencies          dipendenze release, cambiano raramente
+#   spring-boot-loader    launcher di Spring Boot
+#   snapshot-dependencies dipendenze SNAPSHOT
+#   application           classi e risorse dell'app, cambiano spesso
+# In questo modo una modifica al codice non ridistribuisce tutte le dipendenze.
 #
 # =============================================================================
 
@@ -46,6 +41,13 @@ COPY src/ ./src/
 # Build del JAR: Spring Boot 4 genera un layered JAR internamente
 RUN --mount=type=cache,target=/root/.m2 ./mvnw clean package -DskipTests --batch-mode
 
+# Il jarmode "tools" incluso nel JAR estrae fisicamente i layer e il launcher.
+# I layer restano in directory separate per poterli copiare uno alla volta nello
+# stage runtime e ottenere layer Docker con frequenze di invalidazione diverse.
+RUN java -Djarmode=tools \
+        -jar target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar \
+        extract --layers --launcher --destination /build/layers
+
 
 # -----------------------------------------------------------------------------
 # STAGE 2: Runtime
@@ -54,9 +56,14 @@ FROM eclipse-temurin:25-jre
 
 WORKDIR /app
 
-# Copio solo il JAR dal builder (Spring Boot 4 ha gia' tutto dentro il JAR)
-COPY --from=builder /build/target/docker-optimization-showcase-0.0.1-SNAPSHOT.jar app.jar
+# L'ordine va dal contenuto più stabile a quello che cambia più spesso.
+# Ogni COPY genera un layer Docker distinto: modificare una classe applicativa
+# invalida solo l'ultimo, lasciando riutilizzabili dipendenze e loader.
+COPY --from=builder /build/layers/dependencies/ ./
+COPY --from=builder /build/layers/spring-boot-loader/ ./
+COPY --from=builder /build/layers/snapshot-dependencies/ ./
+COPY --from=builder /build/layers/application/ ./
 
 EXPOSE 8080
 
-CMD ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]

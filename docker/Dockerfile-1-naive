@@ -1,8 +1,10 @@
 # Immagine non ottimizzata
 FROM eclipse-temurin:25-jdk
 WORKDIR /app
-# COPY . . senza .dockerignore copia TUTTO il contesto di build:
-# include target/, .git/, .idea/, ecc. → immagine enorme (~600+ MB)
+# Questa variante usa un Dockerfile-specific ignore quasi vuoto, quindi il
+# .dockerignore ottimizzato della root NON si applica: COPY . . riceve target/,
+# metadati locali, ecc. Sono esclusi soltanto gli output del benchmark stesso,
+# per evitare che lo strumento di misura modifichi l'immagine che sta misurando.
 COPY . .
 RUN ./mvnw clean package -DskipTests --batch-mode
 EXPOSE 8080
