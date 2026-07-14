@@ -15,6 +15,7 @@ dependency-reduced-pom.xml
 
 # MD files (documentazione di progetto e report generati, non in Git)
 *.md
+!README.md
 
 # OS X
 .DS_Store
